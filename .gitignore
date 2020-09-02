@@ -1,0 +1,15 @@
+# Ignore vim files
+*.swp
+*.vim
+
+# Ignore compiler/linker ouput
+*.a
+*.ko
+*.o
+
+# Ignore Kbuild output
+*.cmd
+*.mod
+*.mod.*
+*.order
+*.symvers
