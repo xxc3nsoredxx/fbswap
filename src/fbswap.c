@@ -10,7 +10,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("xxc3nsoredxx");
 MODULE_DESCRIPTION("Swap between framebuffer views in the same tty");
-MODULE_VERSION("0.0");
+MODULE_VERSION("0.1");
 
 #define K_L_CTRL	0x1d
 #define K_R_CTRL	0x61
@@ -22,6 +22,10 @@ MODULE_VERSION("0.0");
 #define K_4		0x05
 #define K_5		0x06
 #define K_6		0x07
+#define K_7		0x08
+#define K_8		0x09
+#define K_9		0x0a
+#define K_0		0x0b
 
 /**
  * The possible states for the state machine
@@ -30,12 +34,15 @@ MODULE_VERSION("0.0");
  * RC: Right-Ctrl pressed
  * LA: Left-Alt pressed
  * RA: Right-Alt pressed
+ * *C2: Alt followed by Ctrl
+ * *A2: Ctrl followed by Alt
  * SWITCH: Ctrl-Alt-[Num] detected
  * RESET: wait for no keys to be pressed
  */
 enum states {
 	EMPTY,
 	LC, RC, LA, RA,
+	LC2, RC2, LA2, RA2,
 	SWITCH, RESET
 };
 
@@ -75,7 +82,7 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 	static int keys_pressed[256] = {0};
 	static int num_pressed = 0;
 	int dup_key = 0;
-	/* static enum states s = EMPTY; */
+	static enum states s = EMPTY;
 
 	if (code == KBD_KEYCODE)
 		keycode = param->value;
@@ -98,10 +105,8 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 
 		keys_pressed[num_pressed] = keycode;
 		num_pressed++;
-		pr_info("fbswap: '%02x' pressed, total pressed: %d\n", keycode, num_pressed);
+		/* pr_info("fbswap: '%02x' pressed, total pressed: %d\n", keycode, num_pressed); */
 	} else {
-		int i = 0;
-
 		/* Find the index of the released key */
 		for (i = 0; i < num_pressed && keys_pressed[i] != keycode; i++);
 
@@ -109,7 +114,7 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 			keys_pressed[i] = keys_pressed[i+1];
 		}
 		num_pressed--;
-		pr_info("fbswap: '%02x' released, total pressed: %d\n", keycode, num_pressed);
+		/* pr_info("fbswap: '%02x' released, total pressed: %d\n", keycode, num_pressed); */
 	}
 
 
@@ -118,6 +123,85 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 	 * Any combination of Left/Right-Ctrl and Left/Right-Alt is allowed
 	 * Invalid key goes to the "RESET" state
 	 */
+	switch (s) {
+	case EMPTY:
+		if (keycode == K_L_CTRL) {
+			pr_info("fbswap: Left-Ctrl pressed\n");
+			s = LC;
+		} else if (keycode == K_R_CTRL) {
+			pr_info("fbswap: Right-Control pressed\n");
+			s = RC;
+		} else if (keycode == K_L_ALT) {
+			pr_info("fbswap: Left-Alt pressed\n");
+			s = LA;
+		} else if (keycode == K_R_ALT) {
+			pr_info("fbswap: Right-Alt pressed\n");
+			s = RA;
+		} else {
+			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
+			s = RESET;
+		}
+		break;
+	case LC:
+	case RC:
+		if (keycode == K_L_ALT) {
+			pr_info("fbswap: Ctrl + Left-Alt pressed\n");
+			s = LA2;
+		} else if (keycode == K_R_ALT) {
+			pr_info("fbswap: Ctrl + Right-Alt pressed\n");
+			s = RA2;
+		} else {
+			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
+			s = RESET;
+		}
+		break;
+	case LA:
+	case RA:
+		if (keycode == K_L_CTRL) {
+			pr_info("fbswap: Alt + Left-Ctrl pressed\n");
+			s = LA2;
+		} else if (keycode == K_R_CTRL) {
+			pr_info("fbswap: Alt + Right-Ctrl pressed\n");
+			s = RA2;
+		} else {
+			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
+			s = RESET;
+		}
+		break;
+	case LC2:
+	case RC2:
+	case LA2:
+	case RA2:
+		if (keycode >= K_1 && keycode <= K_0) {
+			pr_info("fbswap: Ctrl-Alt-[Num] pressed - switching framebuffers\n");
+			s = SWITCH;
+			/* TODO: call function to switch framebuffers */
+		} else {
+			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
+			s = RESET;
+		}
+		break;
+	case SWITCH:
+		if (num_pressed > 0) {
+			pr_info("fbswap: SWITCH - total pressed: %d\n", num_pressed);
+		} else {
+			pr_info("fbswap: SWITCH - complete\n");
+			s = EMPTY;
+		}
+		break;
+	case RESET:
+		if (num_pressed > 0) {
+			pr_info("fbswap: RESET - total pressed: %d\n", num_pressed);
+		} else {
+			pr_info("fbswap: RESET - complete\n");
+			s = EMPTY;
+			return NOTIFY_STOP;
+		}
+		break;
+	default:
+		pr_err("fbswap: invalid state detected!\n");
+		break;
+	}
 
 	return NOTIFY_OK;
 }
