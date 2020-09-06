@@ -21,14 +21,6 @@ MODULE_VERSION("0.1");
 #define K_L_ALT		0x38
 #define K_R_ALT		0x64
 #define K_1		0x02
-#define K_2		0x03
-#define K_3		0x04
-#define K_4		0x05
-#define K_5		0x06
-#define K_6		0x07
-#define K_7		0x08
-#define K_8		0x09
-#define K_9		0x0a
 #define K_0		0x0b
 
 /**
