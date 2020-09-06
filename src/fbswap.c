@@ -34,20 +34,15 @@ MODULE_VERSION("0.1");
 /**
  * The possible states for the state machine
  * EMPTY: no keys currently pressed
- * LC: Left-Ctrl pressed
- * RC: Right-Ctrl pressed
- * LA: Left-Alt pressed
- * RA: Right-Alt pressed
- * *C2: Alt followed by Ctrl
- * *A2: Ctrl followed by Alt
- * SWITCH: Ctrl-Alt-[Num] detected
+ * C: Ctrl pressed first
+ * A: Alt pressed first
+ * NUM: Ctrl-Alt pressed
  * RESET: wait for no keys to be pressed
  */
 enum states {
 	EMPTY,
-	LC, RC, LA, RA,
-	LC2, RC2, LA2, RA2,
-	SWITCH, RESET
+	C, A, NUM,
+	RESET
 };
 
 /**
@@ -187,69 +182,44 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 	/* State machine to detect Ctrl-Alt-[Num] */
 	switch (s) {
 	case EMPTY:
-		if (keycode == K_L_CTRL) {
-			pr_info("fbswap: Left-Ctrl pressed\n");
-			s = LC;
-		} else if (keycode == K_R_CTRL) {
-			pr_info("fbswap: Right-Control pressed\n");
-			s = RC;
-		} else if (keycode == K_L_ALT) {
-			pr_info("fbswap: Left-Alt pressed\n");
-			s = LA;
-		} else if (keycode == K_R_ALT) {
-			pr_info("fbswap: Right-Alt pressed\n");
-			s = RA;
+		if (keycode == K_L_CTRL || keycode == K_R_CTRL) {
+			pr_info("fbswap: Ctrl pressed first\n");
+			s = C;
+		} else if (keycode == K_L_ALT || keycode == K_R_ALT) {
+			pr_info("fbswap: Alt pressed first\n");
+			s = A;
 		} else {
 			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
 			s = RESET;
 		}
 		break;
-	case LC:
-	case RC:
-		if (keycode == K_L_ALT) {
-			pr_info("fbswap: Ctrl + Left-Alt pressed\n");
-			s = LA2;
-		} else if (keycode == K_R_ALT) {
-			pr_info("fbswap: Ctrl + Right-Alt pressed\n");
-			s = RA2;
+	case C:
+		if (keycode == K_L_ALT || keycode == K_R_ALT) {
+			pr_info("fbswap: Ctrl + Alt pressed\n");
+			s = NUM;
 		} else {
 			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
 			s = RESET;
 		}
 		break;
-	case LA:
-	case RA:
-		if (keycode == K_L_CTRL) {
-			pr_info("fbswap: Alt + Left-Ctrl pressed\n");
-			s = LA2;
-		} else if (keycode == K_R_CTRL) {
-			pr_info("fbswap: Alt + Right-Ctrl pressed\n");
-			s = RA2;
+	case A:
+		if (keycode == K_L_CTRL || keycode == K_R_CTRL) {
+			pr_info("fbswap: Alt + Ctrl pressed\n");
+			s = NUM;
 		} else {
 			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
 			s = RESET;
 		}
 		break;
-	case LC2:
-	case RC2:
-	case LA2:
-	case RA2:
+	case NUM:
 		if (keycode >= K_1 && keycode <= K_0) {
 			pr_info("fbswap: Ctrl-Alt-[Num] pressed - switching framebuffers\n");
-			s = SWITCH;
 			fb_swap(keycode - K_1);
+			pr_info("fbswap: Switch complete - RESET initiated\n");
 		} else {
 			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
-			s = RESET;
 		}
-		break;
-	case SWITCH:
-		if (num_pressed > 0) {
-			pr_info("fbswap: SWITCH - total pressed: %d\n", num_pressed);
-		} else {
-			pr_info("fbswap: SWITCH - complete\n");
-			s = EMPTY;
-		}
+		s = RESET;
 		break;
 	case RESET:
 		if (num_pressed > 0) {
@@ -257,11 +227,12 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 		} else {
 			pr_info("fbswap: RESET - complete\n");
 			s = EMPTY;
-			return NOTIFY_STOP;
 		}
 		break;
 	default:
 		pr_err("fbswap: invalid state detected!\n");
+		pr_err("fbswap: RESET initiated\n");
+		s = RESET;
 		break;
 	}
 
