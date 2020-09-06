@@ -1,9 +1,13 @@
 #define CONFIG_DEBUG_ATOMIC_SLEEP
 
+#include <linux/err.h>
+#include <linux/errno.h>
+#include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/keyboard.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/notifier.h>
 #include <uapi/linux/keyboard.h>
 
@@ -62,12 +66,76 @@ enum states {
  * 
  * struct vc_data:
  * 	ushort vc_num: console number
+ *
+ * struct fb_info:
+ * 	struct fb_var_screeninfo var: current variable info
+ * 	struct fb_fix_screeninfo fix: current fixed screen info
+ *
+ * struct fb_var_screeninfo:
+ * 	__u32 xres: visible resolution
+ * 	__u32 yres
+ * 	__u32 bits_per_pixel
+ *
+ * struct fb_fix_screeninfo:
+ * 	__u32 type: the pixel type (FB_TYPE_* in uapi/linux/fb.h)
+ * 	__u32 visual: the type of color used (FB_VISUAL_* in uapi/linux/fb.h)
  */
+
+static struct fb_info *get_fb_info(unsigned int idx);
+static void put_fb_info(struct fb_info *fb_info);
+static int fb_swap(unsigned int target);
 static int kb_notified(struct notifier_block *nb, unsigned long code, void *data);
 
 static struct notifier_block kb_nb = {
 	.notifier_call = kb_notified
 };
+static DEFINE_MUTEX(registration_lock);
+static struct fb_info *fb_info;
+
+/* From  drivers/video/core/fbdev/fbmem.c */
+static struct fb_info *get_fb_info(unsigned int idx)
+{
+	struct fb_info *fb_info;
+
+	if (idx >= FB_MAX)
+		return ERR_PTR(-ENODEV);
+	
+	mutex_lock(&registration_lock);
+	fb_info = registered_fb[idx];
+	if (fb_info)
+		atomic_inc(&fb_info->count);
+	mutex_unlock(&registration_lock);
+
+	return fb_info;
+}
+
+static void put_fb_info(struct fb_info *fb_info)
+{
+	if (!atomic_dec_and_test(&fb_info->count))
+		return;
+	if (fb_info->fbops->fb_destroy)
+		fb_info->fbops->fb_destroy(fb_info);
+}
+
+static int fb_swap(unsigned int target)
+{
+	int ret = 0;
+	struct fb_fix_screeninfo *fix;
+	struct fb_var_screeninfo *var;
+	int is_true;
+
+	fix = &fb_info->fix;
+	var = &fb_info->var;
+	is_true = fix->visual == FB_VISUAL_TRUECOLOR;
+
+	/* Print some framebuffer stats */
+	pr_info("fbswap: x resolution: %d\n", var->xres);
+	pr_info("fbswap: y resolution: %d\n", var->yres);
+	pr_info("fbswap: bits per pixel: %d\n", var->bits_per_pixel);
+	pr_info("fbswap: truecolor: %s\n", ((is_true) ? "yes" : "no"));
+
+	return ret;
+}
 
 /**
  * Listens for key-presses and detects when to switch framebuffer views
@@ -105,7 +173,6 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 
 		keys_pressed[num_pressed] = keycode;
 		num_pressed++;
-		/* pr_info("fbswap: '%02x' pressed, total pressed: %d\n", keycode, num_pressed); */
 	} else {
 		/* Find the index of the released key */
 		for (i = 0; i < num_pressed && keys_pressed[i] != keycode; i++);
@@ -114,15 +181,10 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 			keys_pressed[i] = keys_pressed[i+1];
 		}
 		num_pressed--;
-		/* pr_info("fbswap: '%02x' released, total pressed: %d\n", keycode, num_pressed); */
 	}
 
 
-	/**
-	 * State machine to detect Ctrl-Alt-[Num]
-	 * Any combination of Left/Right-Ctrl and Left/Right-Alt is allowed
-	 * Invalid key goes to the "RESET" state
-	 */
+	/* State machine to detect Ctrl-Alt-[Num] */
 	switch (s) {
 	case EMPTY:
 		if (keycode == K_L_CTRL) {
@@ -175,7 +237,7 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
 		if (keycode >= K_1 && keycode <= K_0) {
 			pr_info("fbswap: Ctrl-Alt-[Num] pressed - switching framebuffers\n");
 			s = SWITCH;
-			/* TODO: call function to switch framebuffers */
+			fb_swap(keycode - K_1);
 		} else {
 			pr_info("fbswap: Invalid key pressed - RESET initiated\n");
 			s = RESET;
@@ -210,19 +272,54 @@ static int kb_notified(struct notifier_block *nb, unsigned long code, void *data
  * Initializes the fbswap module
  */
 static int __init fbswap_init(void)
+__acquires(&info->lock)
+__releases(&info->lock)
 {
 	int err;
+	int fbidx = 0;
 
 	err = register_keyboard_notifier(&kb_nb);
 	if (err) {
 		pr_err("fbswap: unable to register keyboard notifier!\n");
-		/* TODO: turn into proper error code */
-		return 1;
+		return err;
 	}
+
+	/* From drivers/video/fbdev/core/fbmem.c */
+	fb_info = get_fb_info(fbidx);
+	if (!fb_info) {
+		request_module("fb%d", fbidx);
+		fb_info = get_fb_info(fbidx);
+		if (!fb_info) {
+			pr_err("fbswap: unable to find fb%d!\n", fbidx);
+			return -ENODEV;
+		}
+	}
+	if (IS_ERR(fb_info)) {
+		pr_err("fbswap: unable to get info for fb%d!\n", fbidx);
+		return PTR_ERR(fb_info);
+	}
+
+	lock_fb_info(fb_info);
+	if (!try_module_get(fb_info->fbops->owner)) {
+		err = -ENODEV;
+		pr_err("fbswap: unable to find fb%d!\n", fbidx);
+		goto out;
+	}
+	if (fb_info->fbops->fb_open) {
+		err = fb_info->fbops->fb_open(fb_info, 1);
+		if (err) {
+			pr_err("fbswap: unable to open fb%d!\n", fbidx);
+			module_put(fb_info->fbops->owner);
+		}
+	}
+out:
+	unlock_fb_info(fb_info);
+	if (err)
+		put_fb_info(fb_info);
 
 	pr_info("fbswap: loaded\n");
 
-	return 0;
+	return err;
 }
 
 /**
@@ -230,8 +327,17 @@ static int __init fbswap_init(void)
  * Cleans up after itslef
  */
 static void __exit fbswap_exit(void)
+__acquires(&info->lock)
+__releases(&info->lock)
 {
 	int err;
+
+	lock_fb_info(fb_info);
+	if (fb_info->fbops->fb_release)
+		fb_info->fbops->fb_release(fb_info, 1);
+	module_put(fb_info->fbops->owner);
+	unlock_fb_info(fb_info);
+	put_fb_info(fb_info);
 
 	err = unregister_keyboard_notifier(&kb_nb);
 	if (err)
@@ -240,10 +346,7 @@ static void __exit fbswap_exit(void)
 	pr_info("fbswap: unloaded\n");
 }
 
-/* Defines the init function */
 module_init(fbswap_init);
-
-/* Defines the exit function */
 module_exit(fbswap_exit);
 
 /* vim: set tabstop=8 noexpandtab: */
